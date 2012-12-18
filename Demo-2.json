@@ -1,0 +1,265 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Austin Cloud User Group 12 Clouds of Christmas Demo - CloudFormation.  Creates IAM Role and policy, AutoScaling Launch Configuration, AutoScaling Group, AutoScaling policies (scale up and scale down), and CloudWatch Alarms to trigger AutoScaling policies.",
+
+  "Parameters" : {
+
+    "SplunkForwarderConnectionInfo" : {
+      "Description" : "For ACUG Demo: FQDN, public, or private IP address of splunk forwarder to put into config file.",
+      "Type" : "String",
+      "Default" : "10.1.19.152"
+    },
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "String",
+      "Default" : "AcugDemoKey",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "AllowedPattern" : "[-_ a-zA-Z0-9]*",
+      "ConstraintDescription" : "Can contain only alphanumeric characters, spaces, dashes and underscores."
+    },
+    "SecurityGroup" : {
+      "Description" : "Name of an existing EC2 SecurityGroup to allow traffic to the instances",
+      "Type" : "String",
+      "Default" : "AcugDemoSecurityGroup",
+      "MinLength": "1",
+      "MaxLength": "64"
+    },
+    "InstanceType" : {
+      "Description" : "EC2 instance type",
+      "Type" : "String",
+      "Default" : "t1.micro",
+      "AllowedValues" : ["t1.micro","m1.small","m1.medium","m1.large","m1.xlarge","m2.xlarge","m2.2xlarge","m2.4xlarge","m3.xlarge","m3.2xlarge","c1.medium","c1.xlarge","cc1.4xlarge","cc2.8xlarge","cg1.4xlarge","hi1.4xlarge"],
+      "ConstraintDescription" : "Must be a valid EC2 instance type."
+    }
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "t1.micro"    : { "Arch" : "64" },
+      "m1.small"    : { "Arch" : "64" },
+      "m1.medium"   : { "Arch" : "64" },
+      "m1.large"    : { "Arch" : "64" },
+      "m1.xlarge"   : { "Arch" : "64" },
+      "m2.xlarge"   : { "Arch" : "64" },
+      "m2.2xlarge"  : { "Arch" : "64" },
+      "m2.4xlarge"  : { "Arch" : "64" },
+      "c1.medium"   : { "Arch" : "64" },
+      "c1.xlarge"   : { "Arch" : "64" }
+    },
+    "AWSRegionArch2AMI" : {
+      "us-east-1"      : { "32" : "ami-1a249873", "64" : "ami-1624987f", "64Cluster" : "ami-a8cd60c1",      "64GPU" : "ami-02f54a6b" },
+      "us-west-2"      : { "32" : "ami-2231bf12", "64" : "ami-2a31bf1a", "64Cluster" : "ami-2431bf14",      "64GPU" : "NOT_YET_SUPPORTED" },
+      "us-west-1"      : { "32" : "ami-19f9de5c", "64" : "ami-1bf9de5e", "64Cluster" : "NOT_YET_SUPPORTED", "64GPU" : "NOT_YET_SUPPORTED" },
+      "eu-west-1"      : { "32" : "ami-937474e7", "64" : "ami-c37474b7", "64Cluster" : "ami-d97474ad",      "64GPU" : "ami-1b02026f" },
+      "ap-southeast-1" : { "32" : "ami-a2a7e7f0", "64" : "ami-a6a7e7f4", "64Cluster" : "NOT_YET_SUPPORTED", "64GPU" : "NOT_YET_SUPPORTED" },
+      "ap-northeast-1" : { "32" : "ami-486cd349", "64" : "ami-4e6cd34f", "64Cluster" : "NOT_YET_SUPPORTED", "64GPU" : "NOT_YET_SUPPORTED" },
+      "ap-southeast-2" : { "32" : "ami-b3990e89", "64" : "ami-bd990e87", "64Cluster" : "NOT_YET_SUPPORTED", "64GPU" : "NOT_YET_SUPPORTED" },
+      "sa-east-1"      : { "32" : "ami-e209d0ff", "64" : "ami-1e08d103", "64Cluster" : "NOT_YET_SUPPORTED", "64GPU" : "NOT_YET_SUPPORTED" }
+    }
+  },
+
+  "Resources" : {
+    "RootRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/"
+      }
+    },
+
+    "RolePolicies": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "root",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "ec2:ModifyInstanceAttribute"
+              ],
+              "Resource": "*"
+            }
+          ]
+      },
+      "Roles": [
+        {
+          "Ref": "RootRole"
+        }
+      ]
+      }
+    },
+
+    "RootInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "RootRole"
+          }
+        ]
+      }
+    },
+
+    "WaitHandle" : {
+      "Type" : "AWS::CloudFormation::WaitConditionHandle"
+    },
+
+    "WaitCondition" : {
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "DependsOn" : "AcugDemoScalingGroup",
+      "Properties" : {
+        "Handle" : {"Ref" : "WaitHandle"},
+        "Timeout" : "60"
+      }
+    },
+
+    "AcugDemoLaunchConfiguration": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+       "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "files" : {
+              "/tmp/demo2.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "# Agent to Intermediate Forwarder\n",
+                  "# [tcpout]\n",
+                  "# defaultGroup = splunk-indexer.mydomain.com_9997\n",
+                  "# disabled = false\n",
+                  "#\n",
+                  "# [tcpout:splunk-indexer.mydomain.com_9997]\n",
+                  "# server = splunk-indexer.mydomain.com:9997\n",
+                  "#\n",
+                  "# [tcpout-server://splunk-indexer.mydomain.com:9997]\n",
+                  "\n",
+                  "[tcpout]\n",
+                  "defaultGroup = ", { "Ref" : "SplunkForwarderConnectionInfo" }, "_9997\n",
+                  "disabled = false\n",
+                  "\n",
+                  "[tcpout:", { "Ref" : "SplunkForwarderConnectionInfo" }, "_9997]\n",
+                  "server = ", { "Ref" : "SplunkForwarderConnectionInfo" }, ":9997\n",
+                  "\n",
+                  "[tcpout-server://", { "Ref" : "SplunkForwarderConnectionInfo" }, ":9997]"
+                ]]},
+                "mode" : "000644",
+                "owner" : "ec2-user",
+                "group" : "ec2-user"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            "AWSRegionArch2AMI",
+            {
+              "Ref": "AWS::Region"
+            },
+            {
+              "Fn::FindInMap": [
+                "AWSInstanceType2Arch",
+                {
+                  "Ref": "InstanceType"
+                },
+                "Arch"
+              ]
+            }
+           ]
+        },
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "IamInstanceProfile": {
+            "Ref": "RootInstanceProfile"
+        },
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceMonitoring": "false",
+        "SecurityGroups": [ { "Ref": "SecurityGroup" } ],
+        "UserData":{ "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+
+          "# Helper function\n",
+          "function error_exit\n",
+          "{\n",
+          "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref" : "WaitHandle" }, "'\n",
+          "  exit 1\n",
+          "}\n",
+
+          "#Some environment variables needed for the ec2* api commands\n",
+          "export JAVA_HOME=/usr/lib/jvm/jre\n",
+          "export EC2_HOME=/opt/aws/apitools/ec2\n",
+          "instanceId=`curl -l http://169.254.169.254/latest/meta-data/instance-id/`\n",
+
+          "#Enable termination protection\n",
+          "/opt/aws/bin/ec2-modify-instance-attribute $instanceId --disable-api-termination true",
+          "    --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to run ec2-modify-instance-attribute'\n",
+          
+          "#Change shutdown behavior to terminate\n",
+          "/opt/aws/bin/ec2-modify-instance-attribute $instanceId --instance-initiated-shutdown-behavior terminate",
+          "    --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to run ec2-modify-instance-attribute'\n",
+
+          "#Run cfn-init\n",
+          "/opt/aws/bin/cfn-init -s ", { "Ref" : "AWS::StackName" }, " -r AcugDemoLaunchConfiguration ",
+          "    --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to run cfn-init'\n",
+          
+          "# All is well so signal success\n",
+          "/opt/aws/bin/cfn-signal -e 0 -r \"AutoScaling Group setup complete\" '", { "Ref" : "WaitHandle" }, "'\n"
+        ]]}
+        }
+      }
+    },
+
+    "AcugDemoScalingGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Version": "2009-05-15",
+      "Properties": {
+          "AvailabilityZones": {
+              "Fn::GetAZs": ""
+          },
+          "LaunchConfigurationName": {
+              "Ref": "AcugDemoLaunchConfiguration"
+          },
+          "MinSize": "1",
+          "MaxSize": "1",
+          "DesiredCapacity": "1",
+          "Tags": [ {
+            "Key" : "environment",
+            "Value" : "dev",
+            "PropagateAtLaunch" : "true"
+          }, {
+            "Key" : "role",
+            "Value" : "Undefined",
+            "PropagateAtLaunch" : "true"
+          }, {
+            "Key" : "owner",
+            "Value" : "Austin Cloud User Group",
+            "PropagateAtLaunch" : "true"
+          }, {
+            "Key" : "product",
+            "Value" : "Demo",
+            "PropagateAtLaunch" : "true"
+          } ]
+      }
+    }
+  }
+}
